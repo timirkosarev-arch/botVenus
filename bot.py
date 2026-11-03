@@ -15,14 +15,12 @@ CHANNEL = "@venus1ai"
 CHANNEL_URL = "https://t.me/venus1ai"
 ADMINS = [8189135964, 8897772924]  # 8897772924 - главный админ
 APK_URL = "https://github.com/timirkosarev-arch/edit-web-site/releases/download/ai/Venus.Ai_1_1.apk"
-SITE_URL = "https://drakekey.vercel.app"
 
 logging.basicConfig(level=logging.INFO)
 
 WELCOME = (
     "Venus AI - твой ИИ-помощник\n\n"
     "Чтобы скачать приложение для Android, нужно быть подписанным на наш канал.\n"
-    "Не хочешь устанавливать? Открой Venus AI прямо в браузере.\n"
     "Нашёл ошибку или есть вопрос? Нажми «Сообщить об ошибке»."
 )
 
@@ -30,16 +28,33 @@ WELCOME = (
 def main_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Скачать для Android", callback_data="download")],
-        [InlineKeyboardButton("Открыть в браузере", url=SITE_URL)],
         [InlineKeyboardButton("Сообщить об ошибке", callback_data="report")],
     ])
 
 
-def sub_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Подписаться на канал", url=CHANNEL_URL)],
-        [InlineKeyboardButton("Я подписался, проверить", callback_data="download")],
-    ])
+def back_row():
+    return [InlineKeyboardButton("Назад", callback_data="menu")]
+
+
+async def show(ctx, chat_id, text, kb):
+    """Всё общение с пользователем идёт в одном сообщении: редактируем его."""
+    mid = ctx.user_data.get("menu_id")
+    if mid:
+        try:
+            await ctx.bot.edit_message_text(text, chat_id=chat_id, message_id=mid, reply_markup=kb)
+            return
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+    m = await ctx.bot.send_message(chat_id, text, reply_markup=kb)
+    ctx.user_data["menu_id"] = m.message_id
+
+
+async def safe_delete(msg):
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
 
 async def is_subscribed(bot, user_id: int) -> bool:
@@ -56,48 +71,67 @@ async def is_subscribed(bot, user_id: int) -> bool:
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    old = ctx.user_data.get("menu_id")
     ctx.user_data.clear()
-    await update.message.reply_text(WELCOME, reply_markup=main_kb())
-
-
-async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data.clear()
-    await update.message.reply_text("Отменено.", reply_markup=main_kb())
+    if old:
+        try:
+            await ctx.bot.delete_message(chat_id, old)
+        except Exception:
+            pass
+    if update.message:
+        await safe_delete(update.message)
+    await show(ctx, chat_id, WELCOME, main_kb())
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
+    chat_id = q.message.chat_id
 
-    if q.data == "download":
+    # Кнопка «Ответить» у админов (сообщение с жалобой не редактируем)
+    if q.data.startswith("reply:"):
+        if uid in ADMINS:
+            ctx.user_data["reply_to"] = int(q.data.split(":")[1])
+            await q.answer("Напишите ответ следующим сообщением. Отмена: /start", show_alert=True)
+        else:
+            await q.answer()
+        return
+
+    # Остальные кнопки работают в том же сообщении
+    ctx.user_data["menu_id"] = q.message.message_id
+
+    if q.data == "menu":
+        await q.answer()
+        ctx.user_data.pop("mode", None)
+        await show(ctx, chat_id, WELCOME, main_kb())
+
+    elif q.data == "download":
         if await is_subscribed(ctx.bot, uid):
             await q.answer("Подписка подтверждена")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Скачать Venus AI (APK)", url=APK_URL)]])
-            await q.message.reply_text(
-                "Готово! Нажми кнопку, скачай файл и установи.\n"
-                "Если Android попросит, разреши установку из этого источника.",
-                reply_markup=kb,
-            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Скачать Venus AI (APK)", url=APK_URL)],
+                back_row(),
+            ])
+            await show(ctx, chat_id,
+                       "Готово! Нажми кнопку, скачай файл и установи.\n"
+                       "Если Android попросит, разреши установку из этого источника.", kb)
         else:
             await q.answer("Сначала подпишитесь на канал", show_alert=True)
-            await q.message.reply_text(
-                "Чтобы скачать приложение, подпишитесь на канал, затем нажмите «Я подписался, проверить».",
-                reply_markup=sub_kb(),
-            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Подписаться на канал", url=CHANNEL_URL)],
+                [InlineKeyboardButton("Я подписался, проверить", callback_data="download")],
+                back_row(),
+            ])
+            await show(ctx, chat_id,
+                       "Чтобы скачать приложение, подпишитесь на канал, затем нажмите «Я подписался, проверить».", kb)
 
     elif q.data == "report":
         await q.answer()
         ctx.user_data["mode"] = "report"
-        await q.message.reply_text(
-            "Опишите ошибку или вопрос одним сообщением. Можно приложить скриншот.\n"
-            "Для отмены: /cancel"
-        )
-
-    elif q.data.startswith("reply:") and uid in ADMINS:
-        await q.answer()
-        target = int(q.data.split(":")[1])
-        ctx.user_data["reply_to"] = target
-        await q.message.reply_text(f"Напишите ответ пользователю {target}. Для отмены: /cancel")
+        await show(ctx, chat_id,
+                   "Опишите ошибку или вопрос одним сообщением. Можно приложить скриншот.",
+                   InlineKeyboardMarkup([back_row()]))
     else:
         await q.answer()
 
@@ -105,7 +139,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     user = update.effective_user
+    chat_id = update.effective_chat.id
 
+    # Админ отвечает пользователю
     if user.id in ADMINS and ctx.user_data.get("reply_to"):
         target = ctx.user_data.pop("reply_to")
         if not msg.text:
@@ -123,6 +159,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Не удалось отправить: пользователь заблокировал бота или чат недоступен.")
         return
 
+    # Пользователь отправляет ошибку
     if ctx.user_data.get("mode") == "report":
         ctx.user_data.pop("mode", None)
         username = f"@{user.username}" if user.username else "без username"
@@ -139,10 +176,13 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await ctx.bot.send_message(a, header + "[вложение не поддерживается]", reply_markup=kb)
             except Exception as e:
                 logging.warning("Не удалось отправить админу %s: %s", a, e)
-        await msg.reply_text("Спасибо! Сообщение отправлено, ответим здесь же.", reply_markup=main_kb())
+        await safe_delete(msg)
+        await show(ctx, chat_id, "Спасибо! Сообщение отправлено, ответим здесь же.", main_kb())
         return
 
-    await msg.reply_text("Выберите действие:", reply_markup=main_kb())
+    # Любое другое сообщение: убираем его и показываем меню в том же сообщении
+    await safe_delete(msg)
+    await show(ctx, chat_id, WELCOME, main_kb())
 
 
 # Мини-сервер для бесплатного хостинга и UptimeRobot
@@ -169,7 +209,7 @@ def main():
     threading.Thread(target=run_health, daemon=True).start()
     app = ApplicationBuilder().token(TOKEN).persistence(PicklePersistence("bot_data.pkl")).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("cancel", start))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, on_message))
     app.run_polling()
